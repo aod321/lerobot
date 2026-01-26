@@ -207,13 +207,12 @@ class DummyFollower(Robot):
         logger.info("Dummy arm calibration not required")
 
     def configure(self) -> None:
-        """Configure the robot for operation."""
-        # Enable torque on the arm
+        """Configure the robot for operation.
+
+        Only enables torque. Moving to work pose is handled by the caller
+        (e.g., lerobot_teleoperate.py) to allow simultaneous movement with leader.
+        """
         self.bus.enable_torque()
-        # Move to work pose (don't wait - leader will wait for both)
-        logger.info("Moving follower to work pose...")
-        self.bus.move_to_pose(self.config.work_pose)
-        logger.debug("Robot configured")
 
     def reset(self) -> None:
         """Reset the robot to work pose between episodes."""

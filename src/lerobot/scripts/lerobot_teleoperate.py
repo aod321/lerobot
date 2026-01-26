@@ -124,7 +124,7 @@ from lerobot.teleoperators import (  # noqa: F401
     so_leader,
 )
 from lerobot.utils.constants import OBS_STR
-from lerobot.utils.control_utils import predict_action
+from lerobot.utils.control_utils import init_keyboard_listener, interruptible_input, predict_action
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import get_safe_torch_device, init_logging, move_cursor_up
@@ -273,7 +273,8 @@ def policy_loop(
     duration: float | None = None,
     task: str | None = None,
     display_compressed_images: bool = False,
-):
+    events: dict | None = None,
+) -> str:
     """
     Control loop using a trained policy to generate robot actions.
 
@@ -294,6 +295,10 @@ def policy_loop(
         duration: Maximum duration of the loop in seconds. If None, runs indefinitely.
         task: Task description string for policy inference.
         display_compressed_images: If True, compresses images before Rerun display.
+        events: Event dictionary from keyboard listener for safety stop detection.
+
+    Returns:
+        Exit reason string: "duration" if duration was reached, "safety_stop" if space key was pressed.
     """
     display_len = max(len(key) for key in robot.action_features)
     start = time.perf_counter()
@@ -305,6 +310,11 @@ def policy_loop(
 
     while True:
         loop_start = time.perf_counter()
+
+        # Check for safety stop event
+        if events is not None and events.get("safety_stop"):
+            events["safety_stop"] = False  # Consume the event
+            return "safety_stop"
 
         # Get robot observation
         obs = robot.get_observation()
@@ -356,7 +366,7 @@ def policy_loop(
         move_cursor_up(1)
 
         if duration is not None and time.perf_counter() - start >= duration:
-            return
+            return "duration"
 
 
 @parser.wrap()
@@ -396,7 +406,7 @@ def teleoperate(cfg: TeleoperateConfig):
             aggregate_pipeline_dataset_features(
                 pipeline=robot_observation_processor,
                 initial_features=create_initial_features(observation=robot.observation_features),
-                use_videos=False,
+                use_videos=True,
             ),
         )
 
@@ -446,31 +456,81 @@ def teleoperate(cfg: TeleoperateConfig):
         if hasattr(teleop, "prepare_recording_start"):
             teleop.prepare_recording_start()
 
+    # Initialize keyboard listener and events for policy mode
+    listener = None
+    events = None
+    if use_policy:
+        listener, events = init_keyboard_listener()
+
     # For dummy_follower with policy: just confirm ready to start
     if robot.name == "dummy_follower" and use_policy:
         print("\n" + "=" * 50)
         print("请确保夹爪已复位到闭合状态")
         print("Policy 控制模式")
+        print("按 空格键 触发安全停止")
         print("=" * 50)
         print("\n按 Enter 开始 Policy 控制...")
         input()
 
     try:
         if use_policy:
-            policy_loop(
-                robot=robot,
-                policy=policy,
-                preprocessor=preprocessor,
-                postprocessor=postprocessor,
-                fps=cfg.fps,
-                features=features,
-                robot_action_processor=robot_action_processor,
-                robot_observation_processor=robot_observation_processor,
-                display_data=cfg.display_data,
-                duration=cfg.teleop_time_s,
-                task=cfg.task,
-                display_compressed_images=display_compressed_images,
-            )
+            # Policy control loop with safety stop handling
+            while True:
+                exit_reason = policy_loop(
+                    robot=robot,
+                    policy=policy,
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    fps=cfg.fps,
+                    features=features,
+                    robot_action_processor=robot_action_processor,
+                    robot_observation_processor=robot_observation_processor,
+                    display_data=cfg.display_data,
+                    duration=cfg.teleop_time_s,
+                    task=cfg.task,
+                    display_compressed_images=display_compressed_images,
+                    events=events,
+                )
+
+                if exit_reason == "safety_stop":
+                    # Move robot to work pose
+                    print("\n" + "=" * 50)
+                    print("正在将机械臂移动到工作位置...")
+                    print("=" * 50)
+                    try:
+                        if hasattr(robot, "bus"):
+                            robot.bus.enable_torque()
+                            robot.bus.move_to_pose(robot.config.work_pose)
+                            time.sleep(2.0)
+                    except Exception as e:
+                        logging.warning(f"安全停止时移动到工作位置出错: {e}")
+
+                    print("\n" + "=" * 50)
+                    print("机械臂已返回工作位置")
+                    print("按 Enter 继续 Policy 控制，按 ESC 退出")
+                    print("=" * 50)
+
+                    # Clear events before waiting for user input
+                    if events is not None:
+                        events["enter_pressed"] = False
+                        events["esc_pressed"] = False
+
+                    # Wait for user to choose continue or exit
+                    if interruptible_input(events=events):
+                        # User pressed Enter, continue policy control
+                        print("继续 Policy 控制...")
+                        # Reset policy state for clean restart
+                        policy.reset()
+                        preprocessor.reset()
+                        postprocessor.reset()
+                        continue
+                    else:
+                        # User pressed ESC, exit
+                        print("退出 Policy 控制...")
+                        break
+                else:
+                    # Duration reached or other exit
+                    break
         else:
             teleop_loop(
                 teleop=teleop,
@@ -523,6 +583,8 @@ def teleoperate(cfg: TeleoperateConfig):
 
         if cfg.display_data:
             rr.rerun_shutdown()
+        if listener is not None:
+            listener.stop()
         if teleop is not None:
             teleop.disconnect()
         robot.disconnect()

@@ -499,6 +499,13 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         if teleop is not None:
             teleop.connect()
 
+        # For dummy_follower: move both arms to work pose simultaneously
+        if robot.name == "dummy_follower" and teleop is not None:
+            logging.info("Moving both arms to work pose simultaneously...")
+            teleop.bus.move_to_pose(teleop.config.work_pose)  # Non-blocking
+            robot.bus.move_to_pose(robot.config.work_pose)    # Non-blocking
+            time.sleep(2.0)  # Wait for both to reach position
+
         listener, events = init_keyboard_listener()
 
         with VideoEncodingManager(dataset):
@@ -527,7 +534,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     # Show combined prompt for dummy_follower (gripper reset + hold arm)
                     if robot.name == "dummy_follower":
                         print("\n" + "=" * 50)
-                        print("请确保夹爪已复位到张开状态")
+                        print("请确保夹爪已复位到闭合状态")
                         print("请用手扶住 Leader 机械臂")
                         print("=" * 50)
 
@@ -704,7 +711,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         if not is_headless() and listener:
             listener.stop()
 
-        if cfg.dataset.push_to_hub:
+        if cfg.dataset.push_to_hub and dataset is not None:
             dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
 
         log_say("Exiting", cfg.play_sounds)

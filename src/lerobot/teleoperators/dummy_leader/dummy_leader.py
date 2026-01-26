@@ -175,17 +175,10 @@ class DummyLeader(Teleoperator):
     def configure(self) -> None:
         """Configure the teleoperator for operation.
 
-        Moves the leader arm to work pose but does NOT disable torque or wait for user input.
-        The WAITING state in lerobot_record.py will handle user confirmation and torque disable.
+        Only enables torque. Moving to work pose is handled by the caller
+        (e.g., lerobot_teleoperate.py) to allow simultaneous movement with follower.
         """
-        # First enable torque and move to work pose
         self.bus.enable_torque()
-        logger.info("Moving leader to work pose...")
-        self.bus.move_to_pose(self.config.work_pose)
-        # Wait for both arms to reach work pose (follower started moving earlier)
-        time.sleep(2.0)
-        # NOTE: Do not disable torque here - it will be done in prepare_recording_start()
-        # after user confirms they are ready in WAITING state
 
     def prepare_recording_start(self) -> None:
         """Prepare for recording start by disabling leader torque.

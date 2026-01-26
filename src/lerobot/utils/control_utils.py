@@ -137,6 +137,7 @@ def init_keyboard_listener():
     events["stop_recording"] = False
     events["esc_pressed"] = False  # Raw ESC event for state-aware handling
     events["enter_pressed"] = False  # Enter key event for event-driven input
+    events["safety_stop"] = False  # Safety stop for policy control mode
 
     if is_headless():
         logging.warning(
@@ -170,6 +171,9 @@ def init_keyboard_listener():
                 events["esc_pressed"] = True  # Let caller decide behavior based on state
             elif key == keyboard.Key.enter:
                 events["enter_pressed"] = True
+            elif key == keyboard.Key.space:
+                print("\n[安全停止] 空格键按下，正在停止 Policy 控制...")
+                events["safety_stop"] = True
         except Exception as e:
             print(f"Error handling key press: {e}")
 
