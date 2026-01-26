@@ -9,11 +9,11 @@ import time
 import threading
 import traceback
 import struct
-import fibre.protocol
-import fibre.utils
-import fibre.remote_object
-from fibre.utils import Event, Logger
-from fibre.protocol import ChannelBrokenException, TimeoutError
+from . import protocol as fibre_protocol
+from . import utils as fibre_utils
+from . import remote_object as fibre_remote_object
+from .utils import Event, Logger
+from .protocol import ChannelBrokenException, TimeoutError
 import appdirs
 import os
 
@@ -22,26 +22,26 @@ import os
 channel_types = {}
 
 try:
-    import fibre.usbbulk_transport
-    channel_types['usb'] = fibre.usbbulk_transport.discover_channels
+    from . import usbbulk_transport as fibre_usbbulk_transport
+    channel_types['usb'] = fibre_usbbulk_transport.discover_channels
 except ImportError:
     pass
 
 try:
-    import fibre.serial_transport
-    channel_types['serial'] = fibre.serial_transport.discover_channels
+    from . import serial_transport as fibre_serial_transport
+    channel_types['serial'] = fibre_serial_transport.discover_channels
 except ImportError:
     pass
 
 try:
-    import fibre.tcp_transport
-    channel_types['tcp'] = fibre.tcp_transport.discover_channels
+    from . import tcp_transport as fibre_tcp_transport
+    channel_types['tcp'] = fibre_tcp_transport.discover_channels
 except ImportError:
     pass
 
 try:
-    import fibre.udp_transport
-    channel_types['udp'] = fibre.udp_transport.discover_channels
+    from . import udp_transport as fibre_udp_transport
+    channel_types['udp'] = fibre_udp_transport.discover_channels
 except ImportError:
     pass
 
@@ -88,7 +88,7 @@ def find_all(path, serial_number,
             try:
                 if not cache_path is None:
                     with open(cache_path, 'rb') as fp:
-                        json_crc16 = fibre.protocol.calc_crc16(fibre.protocol.PROTOCOL_VERSION, fp.read())
+                        json_crc16 = fibre_protocol.calc_crc16(fibre_protocol.PROTOCOL_VERSION, fp.read())
                         fp.seek(0)
                         json_data = json.load(fp)
             except:
@@ -105,7 +105,7 @@ def find_all(path, serial_number,
                     logger.debug("Device responded on endpoint 0 with something that is not ASCII")
                     raise UnicodeDecodeError
 
-                json_crc16 = fibre.protocol.calc_crc16(fibre.protocol.PROTOCOL_VERSION, json_bytes)
+                json_crc16 = fibre_protocol.calc_crc16(fibre_protocol.PROTOCOL_VERSION, json_bytes)
                 json_data = json.loads(json_string)
 
                 # Save JSON to cache
@@ -121,12 +121,12 @@ def find_all(path, serial_number,
             logger.debug("JSON: " + str(json_data).replace("{'name'", "\n{'name'"))
 
             json_data = {"name": "fibre_node", "members": json_data}
-            obj = fibre.remote_object.RemoteObject(json_data, None, channel, logger)
+            obj = fibre_remote_object.RemoteObject(json_data, None, channel, logger)
 
             obj.__dict__['_json_data'] = json_data['members']
             obj.__dict__['_json_crc'] = json_crc16
 
-            device_serial_number = fibre.utils.get_serial_number_str(obj)
+            device_serial_number = fibre_utils.get_serial_number_str(obj)
             if serial_number != None and device_serial_number != serial_number:
                 logger.debug("Ignoring device with serial number {}".format(device_serial_number))
                 return

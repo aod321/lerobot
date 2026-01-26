@@ -3,13 +3,13 @@ import sys
 import socket
 import time
 import traceback
-import fibre.protocol
-from fibre.utils import wait_any
+from . import protocol as fibre_protocol
+from .utils import wait_any, TimeoutError
 
 def noprint(x):
   pass
 
-class UDPTransport(fibre.protocol.PacketSource, fibre.protocol.PacketSink):
+class UDPTransport(fibre_protocol.PacketSource, fibre_protocol.PacketSink):
   def __init__(self, dest_addr, dest_port, logger):
     # TODO: FIXME: use IPv6
     # Problem: getaddrinfo fails if the resolver returns an
@@ -53,8 +53,8 @@ def discover_channels(path, serial_number, callback, cancellation_token, channel
 
   while not cancellation_token.is_set():
     try:
-      udp_transport = fibre.udp_transport.UDPTransport(dest_addr, dest_port, logger)
-      channel = fibre.protocol.Channel(
+      udp_transport = UDPTransport(dest_addr, dest_port, logger)
+      channel = fibre_protocol.Channel(
               "UDP device {}:{}".format(dest_addr, dest_port),
               udp_transport, udp_transport,
               channel_termination_token, logger)

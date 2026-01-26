@@ -33,27 +33,28 @@ class DummyFollowerConfig(RobotConfig):
     # Whether gripper is enabled
     gripper_enabled: bool = True
 
-    # Gripper serial port for DM_CAN communication
-    gripper_serial_port: str = "/dev/tty.usbmodem00000000050C1"
+    # Gripper connection mode: "fibre" (fibre direct connection) or "dm_can" (serial-to-CAN)
+    # Default is "fibre" for DummyFollower (work arm)
+    gripper_connection_mode: str = "fibre"
 
-    # Gripper serial baudrate
-    gripper_baudrate: int = 921600
-
-    # Gripper motor ID (DM_CAN)
-    gripper_motor_id: int = 0x37
-
-    # Gripper master ID (DM_CAN)
-    gripper_master_id: int = 0x47
-
-    # MIT control parameters
+    # MIT control parameters (used by both modes)
     gripper_kp: float = 0.8
     gripper_kd: float = 0.05
+
+    # DM_CAN mode parameters (only used when gripper_connection_mode="dm_can")
+    gripper_serial_port: str = "/dev/ttyUSB0"
+    gripper_baudrate: int = 921600
+    gripper_motor_id: int = 0x37
+    gripper_master_id: int = 0x47
 
     # Whether to use degrees for joint positions (True) or radians (False)
     use_degrees: bool = True
 
     # Whether to disable torque on disconnect
     disable_torque_on_disconnect: bool = True
+
+    # Work pose [j1, j2, j3, j4, j5, j6] (kinematic angles in degrees)
+    work_pose: list[float] = field(default_factory=lambda: [0.0, -30.0, 90.0, 0.0, 70.0, 0.0])
 
     # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
     max_relative_target: float | dict[str, float] | None = None

@@ -6,7 +6,7 @@ import sys
 import json
 import struct
 import threading
-import fibre.protocol
+from . import protocol as fibre_protocol
 
 class ObjectDefinitionError(Exception):
     pass

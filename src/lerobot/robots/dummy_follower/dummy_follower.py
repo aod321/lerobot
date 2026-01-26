@@ -70,7 +70,9 @@ class DummyFollower(Robot):
 
         # Initialize gripper controller if enabled
         self._gripper_controller: Any = None
-        self._gripper_position: float = 0.0  # Cached gripper position (0-100)
+        self._gripper_motor: Any = None
+        self._gripper_mode: str | None = None  # "fibre" or "dm_can"
+        self._gripper_position: float = 0.0  # Cached gripper position (radians)
 
         # Initialize cameras
         self.cameras = make_cameras_from_configs(config.cameras)
@@ -104,7 +106,7 @@ class DummyFollower(Robot):
         arm_connected = self.bus.is_connected
         cameras_connected = all(cam.is_connected for cam in self.cameras.values())
         gripper_connected = (
-            not self.config.gripper_enabled or self._gripper_controller is not None
+            not self.config.gripper_enabled or self._gripper_mode is not None
         )
         return arm_connected and cameras_connected and gripper_connected
 
@@ -132,7 +134,25 @@ class DummyFollower(Robot):
         logger.info(f"{self} connected.")
 
     def _connect_gripper(self) -> None:
-        """Connect to the DMH3510 gripper via DM_CAN."""
+        """Connect to the gripper using the configured connection mode."""
+        if self.config.gripper_connection_mode == "fibre":
+            self._connect_gripper_fibre()
+        else:
+            self._connect_gripper_dm_can()
+
+    def _connect_gripper_fibre(self) -> None:
+        """Connect to the gripper via fibre direct connection."""
+        try:
+            self.bus.enable_hand()
+            self.bus.set_hand_zero()
+            self._gripper_mode = "fibre"
+            logger.info("Gripper connected via fibre")
+        except Exception as e:
+            logger.error(f"Failed to connect gripper via fibre: {e}")
+            self._gripper_mode = None
+
+    def _connect_gripper_dm_can(self) -> None:
+        """Connect to the DMH3510 gripper via DM_CAN (serial-to-CAN)."""
         try:
             import serial
             from lerobot.third_party.DM_CAN import Control_Type, DM_Motor_Type, Motor, MotorControl
@@ -158,6 +178,7 @@ class DummyFollower(Robot):
             self._gripper_controller.enable(self._gripper_motor)
             self._gripper_controller.switchControlMode(self._gripper_motor, Control_Type.MIT)
 
+            self._gripper_mode = "dm_can"
             logger.info("Gripper connected via DM_CAN")
 
         except ImportError as e:
@@ -165,9 +186,11 @@ class DummyFollower(Robot):
                 f"DM_CAN library not available, gripper will be disabled: {e}"
             )
             self._gripper_controller = None
+            self._gripper_mode = None
         except Exception as e:
-            logger.error(f"Failed to connect gripper: {e}")
+            logger.error(f"Failed to connect gripper via DM_CAN: {e}")
             self._gripper_controller = None
+            self._gripper_mode = None
 
     @property
     def is_calibrated(self) -> bool:
@@ -187,7 +210,17 @@ class DummyFollower(Robot):
         """Configure the robot for operation."""
         # Enable torque on the arm
         self.bus.enable_torque()
+        # Move to work pose (don't wait - leader will wait for both)
+        logger.info("Moving follower to work pose...")
+        self.bus.move_to_pose(self.config.work_pose)
         logger.debug("Robot configured")
+
+    def reset(self) -> None:
+        """Reset the robot to work pose between episodes."""
+        logger.info("Resetting follower to work pose...")
+        self.bus.enable_torque()
+        self.bus.move_to_pose(self.config.work_pose)
+        time.sleep(2.0)
 
     @check_if_not_connected
     def get_observation(self) -> RobotObservation:
@@ -229,20 +262,18 @@ class DummyFollower(Robot):
         return obs_dict
 
     def _read_gripper_position(self) -> float:
-        """Read gripper position (0-100 scale)."""
-        if self._gripper_controller is None:
+        """Read gripper position (radians)."""
+        if self._gripper_mode is None:
             return self._gripper_position
 
         try:
-            # Read position from DM_CAN motor
-            # Position is typically in radians, convert to 0-100 scale
-            state = self._gripper_controller.read(self._gripper_motor)
-            if state is not None:
-                # Map motor position to 0-100 gripper scale
-                # This mapping depends on the gripper mechanism
-                raw_pos = state.q  # Position in radians
-                # Example mapping: 0 rad = open (100), max rad = closed (0)
-                self._gripper_position = max(0.0, min(100.0, (1.0 - raw_pos / 3.14) * 100.0))
+            if self._gripper_mode == "fibre":
+                self._gripper_position = self.bus.get_hand_position()
+            else:
+                state = self._gripper_controller.read(self._gripper_motor)
+                self._gripper_position = state.q if state is not None else 0.0
+
+            logger.debug(f"Follower gripper position: {self._gripper_position:.4f} rad")
 
         except Exception as e:
             logger.debug(f"Failed to read gripper position: {e}")
@@ -305,26 +336,35 @@ class DummyFollower(Robot):
         Send gripper command via MIT control.
 
         Args:
-            target_position: Target position in 0-100 scale.
+            target_position: Target position in radians.
         """
-        if self._gripper_controller is None:
+        if self._gripper_mode is None:
             self._gripper_position = target_position
             return
 
         try:
-            # Convert 0-100 scale to motor position (radians)
-            # Example mapping: 100 (open) = 0 rad, 0 (closed) = max rad
-            target_rad = (1.0 - target_position / 100.0) * 3.14
+            # target_position is already in radians (directly from leader)
+            logger.debug(f"Follower gripper target: {target_position:.4f} rad")
 
-            # Send MIT control command
-            self._gripper_controller.controlMIT(
-                self._gripper_motor,
-                self.config.gripper_kp,
-                self.config.gripper_kd,
-                target_rad,
-                0.0,  # velocity
-                0.0,  # torque feedforward
-            )
+            if self._gripper_mode == "fibre":
+                # Send MIT control via fibre direct connection
+                self.bus.control_hand_mit(
+                    self.config.gripper_kp,
+                    self.config.gripper_kd,
+                    target_position,  # 直接使用弧度
+                    0.0,  # velocity
+                    0.0,  # torque feedforward
+                )
+            else:
+                # Send MIT control via DM_CAN
+                self._gripper_controller.controlMIT(
+                    self._gripper_motor,
+                    self.config.gripper_kp,
+                    self.config.gripper_kd,
+                    target_position,  # 直接使用弧度
+                    0.0,  # velocity
+                    0.0,  # torque feedforward
+                )
             self._gripper_position = target_position
 
         except Exception as e:
@@ -333,23 +373,38 @@ class DummyFollower(Robot):
     @check_if_not_connected
     def disconnect(self) -> None:
         """Disconnect from the robot."""
-        # Disable torque if configured
+        # 1. 安全 resting 流程（在失能前）
+        if self.bus.is_connected:
+            try:
+                self.bus.enable_torque()
+                self.bus.resting()
+                time.sleep(2.0)  # 等待到位
+            except Exception as e:
+                logger.warning(f"Failed to move to resting pose: {e}")
+
+        # 2. Disable torque if configured
         if self.config.disable_torque_on_disconnect:
             try:
                 self.bus.disable_torque()
             except Exception as e:
                 logger.warning(f"Failed to disable torque: {e}")
 
-        # Disconnect arm
-        self.bus.disconnect()
-
         # Disconnect gripper
-        if self._gripper_controller is not None:
+        if self._gripper_mode == "fibre":
+            try:
+                self.bus.disable_hand()
+            except Exception as e:
+                logger.warning(f"Failed to disable hand: {e}")
+        elif self._gripper_mode == "dm_can" and self._gripper_controller is not None:
             try:
                 self._gripper_controller.disable(self._gripper_motor)
             except Exception as e:
                 logger.warning(f"Failed to disable gripper: {e}")
             self._gripper_controller = None
+        self._gripper_mode = None
+
+        # Disconnect arm
+        self.bus.disconnect()
 
         # Disconnect cameras
         for cam in self.cameras.values():

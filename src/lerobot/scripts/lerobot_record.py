@@ -65,9 +65,21 @@ lerobot-record \
 import logging
 import time
 from dataclasses import asdict, dataclass, field
+from enum import Enum, auto
 from pathlib import Path
 from pprint import pformat
 from typing import Any
+
+
+class RecordingState(Enum):
+    """State machine states for the recording process."""
+    IDLE = auto()       # Not started
+    WAITING = auto()    # Between episodes, waiting to start
+    RECORDING = auto()  # Recording frames
+    SAVING = auto()     # Saving current episode
+    RESETTING = auto()  # Environment reset phase
+    DISCARDING = auto() # Discarding current episode (rerecord)
+    EXIT = auto()       # Cleanup and exit
 
 from lerobot.cameras import (  # noqa: F401
     CameraConfig,  # noqa: F401
@@ -99,6 +111,7 @@ from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
     bi_so_follower,
+    dummy_follower,
     earthrover_mini_plus,
     hope_jr,
     koch_follower,
@@ -112,6 +125,7 @@ from lerobot.teleoperators import (  # noqa: F401
     Teleoperator,
     TeleoperatorConfig,
     bi_so_leader,
+    dummy_leader,
     homunculus,
     koch_leader,
     make_teleoperator_from_config,
@@ -123,6 +137,7 @@ from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.control_utils import (
     init_keyboard_listener,
+    interruptible_input,
     is_headless,
     predict_action,
     sanity_check_dataset_name,
@@ -432,6 +447,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
     dataset = None
     listener = None
+    events = None
 
     try:
         if cfg.resume:
@@ -486,37 +502,61 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         listener, events = init_keyboard_listener()
 
         with VideoEncodingManager(dataset):
-            recorded_episodes = 0
-            while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
-                log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
-                record_loop(
-                    robot=robot,
-                    events=events,
-                    fps=cfg.dataset.fps,
-                    teleop_action_processor=teleop_action_processor,
-                    robot_action_processor=robot_action_processor,
-                    robot_observation_processor=robot_observation_processor,
-                    teleop=teleop,
-                    policy=policy,
-                    preprocessor=preprocessor,
-                    postprocessor=postprocessor,
-                    dataset=dataset,
-                    control_time_s=cfg.dataset.episode_time_s,
-                    single_task=cfg.dataset.single_task,
-                    display_data=cfg.display_data,
-                    display_compressed_images=display_compressed_images,
+            # Fix resume bug: initialize from existing episodes when resuming
+            recorded_episodes = dataset.num_episodes if cfg.resume else 0
+
+            # Add warning if already at target
+            if cfg.resume and recorded_episodes >= cfg.dataset.num_episodes:
+                logging.warning(
+                    f"Dataset already has {recorded_episodes} episodes, "
+                    f"which meets or exceeds target of {cfg.dataset.num_episodes}. "
+                    f"No new episodes will be recorded. Use -n to specify a higher target."
                 )
 
-                # Execute a few seconds without recording to give time to manually reset the environment
-                # Skip reset for the last episode to be recorded
-                if not events["stop_recording"] and (
-                    (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
-                ):
-                    log_say("Reset the environment", cfg.play_sounds)
+            state = RecordingState.WAITING
 
-                    # reset g1 robot
-                    if robot.name == "unitree_g1":
-                        robot.reset()
+            while recorded_episodes < cfg.dataset.num_episodes:
+
+                # ==================== WAITING state ====================
+                if state == RecordingState.WAITING:
+                    # Clear all event flags - ESC will be handled by interruptible_input
+                    events["exit_early"] = False
+                    events["rerecord_episode"] = False
+                    events["esc_pressed"] = False
+
+                    # Show combined prompt for dummy_follower (gripper reset + hold arm)
+                    if robot.name == "dummy_follower":
+                        print("\n" + "=" * 50)
+                        print("请确保夹爪已复位到张开状态")
+                        print("请用手扶住 Leader 机械臂")
+                        print("=" * 50)
+
+                    remaining = cfg.dataset.num_episodes - recorded_episodes - 1
+                    print(f"\nPress Enter to start recording episode {recorded_episodes + 1}/{cfg.dataset.num_episodes} ({remaining} remaining)...")
+                    print("(Press ESC to exit)")
+
+                    # Use interruptible_input: returns False if ESC pressed
+                    if not interruptible_input(events=events):
+                        # [W2] ESC pressed -> exit
+                        print("ESC: Exiting recording")
+                        events["stop_recording"] = True
+                        break
+
+                    # After user presses Enter, disable leader torque for dummy_follower
+                    if robot.name == "dummy_follower" and teleop is not None:
+                        if hasattr(teleop, 'prepare_recording_start'):
+                            teleop.prepare_recording_start()
+
+                    # [W1] WAITING -> RECORDING
+                    state = RecordingState.RECORDING
+                    continue
+
+                # ==================== RECORDING state ====================
+                elif state == RecordingState.RECORDING:
+                    # Clear ESC (ignored in this state)
+                    events["esc_pressed"] = False
+
+                    log_say(f"Recording episode {recorded_episodes + 1}/{cfg.dataset.num_episodes}", cfg.play_sounds)
 
                     record_loop(
                         robot=robot,
@@ -526,25 +566,135 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         robot_action_processor=robot_action_processor,
                         robot_observation_processor=robot_observation_processor,
                         teleop=teleop,
-                        control_time_s=cfg.dataset.reset_time_s,
+                        policy=policy,
+                        preprocessor=preprocessor,
+                        postprocessor=postprocessor,
+                        dataset=dataset,
+                        control_time_s=cfg.dataset.episode_time_s,
                         single_task=cfg.dataset.single_task,
                         display_data=cfg.display_data,
+                        display_compressed_images=display_compressed_images,
                     )
 
-                if events["rerecord_episode"]:
-                    log_say("Re-record episode", cfg.play_sounds)
-                    events["rerecord_episode"] = False
-                    events["exit_early"] = False
-                    dataset.clear_episode_buffer()
+                    if events["rerecord_episode"]:
+                        # [R2] RECORDING -> DISCARDING
+                        events["rerecord_episode"] = False
+                        events["exit_early"] = False
+                        state = RecordingState.DISCARDING
+                    else:
+                        # [R1] RECORDING -> SAVING
+                        state = RecordingState.SAVING
                     continue
 
-                dataset.save_episode()
-                recorded_episodes += 1
+                # ==================== SAVING state ====================
+                elif state == RecordingState.SAVING:
+                    # Ignore all keys
+                    events["exit_early"] = False
+                    events["rerecord_episode"] = False
+                    events["esc_pressed"] = False
+
+                    dataset.save_episode()
+                    recorded_episodes += 1
+                    log_say("Episode saved", cfg.play_sounds)
+
+                    if recorded_episodes >= cfg.dataset.num_episodes:
+                        break
+
+                    # [S1] SAVING -> RESETTING
+                    state = RecordingState.RESETTING
+                    continue
+
+                # ==================== DISCARDING state ====================
+                elif state == RecordingState.DISCARDING:
+                    # DISCARDING state ignores all keys
+                    events["exit_early"] = False
+                    events["rerecord_episode"] = False
+                    events["esc_pressed"] = False
+
+                    log_say("Re-record episode", cfg.play_sounds)
+                    dataset.clear_episode_buffer()
+
+                    # [D1] DISCARDING -> RESETTING
+                    state = RecordingState.RESETTING
+                    continue
+
+                # ==================== RESETTING state ====================
+                elif state == RecordingState.RESETTING:
+                    # Ignore all keys
+                    events["exit_early"] = False
+                    events["rerecord_episode"] = False
+                    events["esc_pressed"] = False
+
+                    log_say("Reset the environment", cfg.play_sounds)
+
+                    skip_reset_loop = False
+
+                    # reset g1 robot
+                    if robot.name == "unitree_g1":
+                        robot.reset()
+                    # reset dummy_follower robot with coordinated teleop preparation
+                    # Both arms move simultaneously when robot is passed to prepare_for_next_episode
+                    # Pass events=None to make it non-interruptible
+                    if robot.name == "dummy_follower":
+                        if teleop is not None and hasattr(teleop, 'prepare_for_next_episode'):
+                            teleop.prepare_for_next_episode(robot, events=None)
+                            skip_reset_loop = True
+                        else:
+                            robot.reset()
+
+                    if not skip_reset_loop:
+                        # Create a dummy events dict for reset loop that ignores exit_early
+                        reset_events = {"exit_early": False, "rerecord_episode": False, "esc_pressed": False}
+                        record_loop(
+                            robot=robot,
+                            events=reset_events,
+                            fps=cfg.dataset.fps,
+                            teleop_action_processor=teleop_action_processor,
+                            robot_action_processor=robot_action_processor,
+                            robot_observation_processor=robot_observation_processor,
+                            teleop=teleop,
+                            control_time_s=cfg.dataset.reset_time_s,
+                            single_task=cfg.dataset.single_task,
+                            display_data=cfg.display_data,
+                        )
+
+                    # [T1] RESETTING -> WAITING
+                    state = RecordingState.WAITING
+                    continue
+
+            state = RecordingState.EXIT
     finally:
         log_say("Stop recording", cfg.play_sounds, blocking=True)
 
+        # If ESC was pressed and this is dummy_follower, move both arms to work pose first
+        if events and events["stop_recording"] and robot.name == "dummy_follower":
+            try:
+                print("\n" + "=" * 50)
+                print("ESC 退出：正在将机械臂移动到工作位置...")
+                print("=" * 50)
+                # Move both arms to work pose (non-blocking)
+                if hasattr(robot, 'bus'):
+                    robot.bus.enable_torque()
+                    robot.bus.move_to_pose(robot.config.work_pose)
+                if teleop is not None and hasattr(teleop, 'bus'):
+                    teleop.bus.enable_torque()
+                    teleop.bus.move_to_pose(teleop.config.work_pose)
+                # Wait for both arms to reach work pose
+                time.sleep(2.0)
+            except Exception as e:
+                logging.warning(f"Failed to move arms to work pose: {e}")
+
         if dataset:
             dataset.finalize()
+
+        # 如果是 dummy_follower，提示用户准备结束
+        if robot.name == "dummy_follower":
+            print("\n" + "=" * 50)
+            print("数据采集完成！")
+            print("机械臂即将移动到安全位置（resting pose）")
+            print("请确保周围安全，然后按 Enter 继续...")
+            print("=" * 50)
+            input()
 
         if robot.is_connected:
             robot.disconnect()

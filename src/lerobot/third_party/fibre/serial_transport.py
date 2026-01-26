@@ -9,13 +9,13 @@ import time
 import traceback
 import serial
 import serial.tools.list_ports
-import fibre
-from fibre.utils import TimeoutError
+from . import protocol as fibre_protocol
+from .utils import TimeoutError
 
 # TODO: make this customizable
 DEFAULT_BAUDRATE = 115200
 
-class SerialStreamTransport(fibre.protocol.StreamSource, fibre.protocol.StreamSink):
+class SerialStreamTransport(fibre_protocol.StreamSource, fibre_protocol.StreamSink):
     def __init__(self, port, baud):
         self._dev = serial.Serial(port, baud, timeout=1)
 
@@ -85,9 +85,9 @@ def discover_channels(path, serial_number, callback, cancellation_token, channel
         for port_name in new_ports:
             try:
                 serial_device = SerialStreamTransport(port_name, DEFAULT_BAUDRATE)
-                input_stream = fibre.protocol.PacketFromStreamConverter(serial_device)
-                output_stream = fibre.protocol.StreamBasedPacketSink(serial_device)
-                channel = fibre.protocol.Channel(
+                input_stream = fibre_protocol.PacketFromStreamConverter(serial_device)
+                output_stream = fibre_protocol.StreamBasedPacketSink(serial_device)
+                channel = fibre_protocol.Channel(
                         "serial port {}@{}".format(port_name, DEFAULT_BAUDRATE),
                         input_stream, output_stream, channel_termination_token, logger)
                 channel.serial_device = serial_device

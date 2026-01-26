@@ -6,7 +6,7 @@ import sys
 import threading
 import traceback
 #import fibre.utils
-from fibre.utils import Event, wait_any, TimeoutError
+from .utils import Event, wait_any, TimeoutError
 
 import abc
 if sys.version_info >= (3, 4):

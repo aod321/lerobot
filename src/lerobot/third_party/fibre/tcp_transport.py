@@ -3,13 +3,13 @@ import sys
 import socket
 import time
 import traceback
-import fibre.protocol
-from fibre.utils import wait_any, TimeoutError
+from . import protocol as fibre_protocol
+from .utils import wait_any, TimeoutError
 
 def noprint(x):
   pass
 
-class TCPTransport(fibre.protocol.StreamSource, fibre.protocol.StreamSink):
+class TCPTransport(fibre_protocol.StreamSource, fibre_protocol.StreamSink):
   def __init__(self, dest_addr, dest_port, logger):
     # TODO: FIXME: use IPv6
     # Problem: getaddrinfo fails if the resolver returns an
@@ -69,10 +69,10 @@ def discover_channels(path, serial_number, callback, cancellation_token, channel
 
   while not cancellation_token.is_set():
     try:
-      tcp_transport = fibre.tcp_transport.TCPTransport(dest_addr, dest_port, logger)
-      stream2packet_input = fibre.protocol.PacketFromStreamConverter(tcp_transport)
-      packet2stream_output = fibre.protocol.StreamBasedPacketSink(tcp_transport)
-      channel = fibre.protocol.Channel(
+      tcp_transport = TCPTransport(dest_addr, dest_port, logger)
+      stream2packet_input = fibre_protocol.PacketFromStreamConverter(tcp_transport)
+      packet2stream_output = fibre_protocol.StreamBasedPacketSink(tcp_transport)
+      channel = fibre_protocol.Channel(
               "TCP device {}:{}".format(dest_addr, dest_port),
               stream2packet_input, packet2stream_output,
               channel_termination_token, logger)

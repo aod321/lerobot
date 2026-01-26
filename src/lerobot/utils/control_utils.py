@@ -135,6 +135,8 @@ def init_keyboard_listener():
     events["exit_early"] = False
     events["rerecord_episode"] = False
     events["stop_recording"] = False
+    events["esc_pressed"] = False  # Raw ESC event for state-aware handling
+    events["enter_pressed"] = False  # Enter key event for event-driven input
 
     if is_headless():
         logging.warning(
@@ -146,7 +148,15 @@ def init_keyboard_listener():
     # Only import pynput if not in a headless environment
     from pynput import keyboard
 
+    # Track pressed keys to prevent repeated triggers when key is held down
+    _pressed_keys = set()
+
     def on_press(key):
+        # Ignore if key is already pressed (prevents repeated triggers)
+        if key in _pressed_keys:
+            return
+        _pressed_keys.add(key)
+
         try:
             if key == keyboard.Key.right:
                 print("Right arrow key pressed. Exiting loop...")
@@ -156,13 +166,17 @@ def init_keyboard_listener():
                 events["rerecord_episode"] = True
                 events["exit_early"] = True
             elif key == keyboard.Key.esc:
-                print("Escape key pressed. Stopping data recording...")
-                events["stop_recording"] = True
-                events["exit_early"] = True
+                print("Escape key pressed.")
+                events["esc_pressed"] = True  # Let caller decide behavior based on state
+            elif key == keyboard.Key.enter:
+                events["enter_pressed"] = True
         except Exception as e:
             print(f"Error handling key press: {e}")
 
-    listener = keyboard.Listener(on_press=on_press)
+    def on_release(key):
+        _pressed_keys.discard(key)
+
+    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
 
     return listener, events
@@ -233,3 +247,47 @@ def sanity_check_dataset_robot_compatibility(
         raise ValueError(
             "Dataset metadata compatibility check failed with mismatches:\n" + "\n".join(mismatches)
         )
+
+
+def interruptible_input(prompt: str = "", events: dict | None = None,
+                        check_interval: float = 0.1) -> bool:
+    """
+    Wait for Enter key press with ESC interrupt support using event-driven mechanism.
+
+    This function uses pynput events instead of stdin buffer to avoid the chain
+    effect bug where Enter keys pressed during recording would accumulate in the
+    buffer and cause unintended behavior.
+
+    Args:
+        prompt: Optional prompt string to display.
+        events: Event dictionary from init_keyboard_listener(). Required for
+                event-driven input. If None, the function returns True immediately.
+        check_interval: How often to check for key events (in seconds).
+
+    Returns:
+        True if the user pressed Enter.
+        False if ESC was pressed (interrupt).
+    """
+    import time
+
+    if prompt:
+        print(prompt, end='', flush=True)
+
+    # If no events dict provided, return immediately (headless mode fallback)
+    if events is None:
+        return True
+
+    # Clear any residual enter event before waiting (ensures one-shot behavior)
+    events["enter_pressed"] = False
+
+    while True:
+        if events.get("esc_pressed"):
+            print()  # Newline after prompt
+            return False
+
+        if events.get("enter_pressed"):
+            events["enter_pressed"] = False  # Consume the event immediately
+            print()  # Newline after prompt
+            return True
+
+        time.sleep(check_interval)
