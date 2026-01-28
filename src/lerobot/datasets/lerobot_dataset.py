@@ -1521,6 +1521,70 @@ class LeRobotDataset(torch.utils.data.Dataset):
         # Reset the buffer
         self.episode_buffer = self.create_episode_buffer()
 
+    def undo_last_episode(self) -> bool:
+        """Undo the last saved episode, allowing it to be re-recorded.
+
+        This method removes the last episode's data and metadata, so the next
+        save_episode() call will use the same episode index.
+
+        Returns:
+            True if successful, False if no episodes to undo.
+        """
+        if self.meta.total_episodes == 0:
+            logging.warning("No episodes to undo")
+            return False
+
+        last_ep_idx = self.meta.total_episodes - 1
+        ep_info = self.meta.episodes[last_ep_idx]
+
+        # 1. Delete video files for this episode
+        for video_key in self.meta.video_keys:
+            video_path = self.root / self.meta.get_video_file_path(last_ep_idx, video_key)
+            if video_path.exists():
+                video_path.unlink()
+                logging.info(f"Deleted video file: {video_path}")
+
+        # 2. Delete data file for this episode
+        data_path = self.root / self.meta.get_data_file_path(last_ep_idx)
+        if data_path.exists():
+            data_path.unlink()
+            logging.info(f"Deleted data file: {data_path}")
+
+        # 3. Update metadata
+        episode_length = ep_info["dataset_to_index"] - ep_info["dataset_from_index"]
+        self.meta.info["total_episodes"] -= 1
+        self.meta.info["total_frames"] -= episode_length
+        self.meta.info["splits"] = {"train": f"0:{self.meta.info['total_episodes']}"}
+        write_info(self.meta.info, self.root)
+
+        # 4. Remove last entry from episodes metadata
+        # Find and update the episodes parquet file
+        chunk_idx = ep_info["meta/episodes/chunk_index"]
+        file_idx = ep_info["meta/episodes/file_index"]
+        episodes_path = self.root / DEFAULT_EPISODES_PATH.format(chunk_index=chunk_idx, file_index=file_idx)
+
+        if episodes_path.exists():
+            # Read the parquet file, remove last row, and rewrite
+            df = pd.read_parquet(episodes_path)
+            if len(df) > 1:
+                df = df.iloc[:-1]
+                df.to_parquet(episodes_path)
+            else:
+                # If only one episode in the file, delete the file
+                episodes_path.unlink()
+                logging.info(f"Deleted episodes file: {episodes_path}")
+
+        # 5. Reload episodes metadata
+        self.meta.episodes = load_episodes(self.root)
+
+        # 6. Reset internal state for next recording
+        self.latest_episode = None
+        self.meta.latest_episode = None
+        self._lazy_loading = True  # Force reload of HF dataset
+
+        logging.info(f"Undone episode {last_ep_idx}")
+        return True
+
     def start_image_writer(self, num_processes: int = 0, num_threads: int = 4) -> None:
         if isinstance(self.image_writer, AsyncImageWriter):
             logging.warning(

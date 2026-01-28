@@ -516,7 +516,8 @@ def teleoperate(cfg: TeleoperateConfig):
                         events["esc_pressed"] = False
 
                     # Wait for user to choose continue or exit
-                    if interruptible_input(events=events):
+                    result = interruptible_input(events=events)
+                    if result == "enter":
                         # User pressed Enter, continue policy control
                         print("继续 Policy 控制...")
                         # Reset policy state for clean restart
@@ -525,7 +526,7 @@ def teleoperate(cfg: TeleoperateConfig):
                         postprocessor.reset()
                         continue
                     else:
-                        # User pressed ESC, exit
+                        # User pressed ESC or other key, exit
                         print("退出 Policy 控制...")
                         break
                 else:

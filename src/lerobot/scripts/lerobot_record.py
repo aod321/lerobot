@@ -79,6 +79,7 @@ class RecordingState(Enum):
     SAVING = auto()     # Saving current episode
     RESETTING = auto()  # Environment reset phase
     DISCARDING = auto() # Discarding current episode (rerecord)
+    UNDO_LAST_EPISODE = auto()  # Undo the last saved episode
     EXIT = auto()       # Cleanup and exit
 
 from lerobot.cameras import (  # noqa: F401
@@ -540,19 +541,27 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
                     remaining = cfg.dataset.num_episodes - recorded_episodes - 1
                     print(f"\nPress Enter to start recording episode {recorded_episodes + 1}/{cfg.dataset.num_episodes} ({remaining} remaining)...")
+                    if recorded_episodes > 0:
+                        print("(Press Left Arrow to delete last saved episode)")
                     print("(Press ESC to exit)")
 
-                    # Use interruptible_input: returns False if ESC pressed
-                    if not interruptible_input(events=events):
+                    # Use interruptible_input: returns "enter", "esc", or "left_arrow"
+                    result = interruptible_input(events=events)
+
+                    if result == "esc":
                         # [W2] ESC pressed -> exit
                         print("ESC: Exiting recording")
                         events["stop_recording"] = True
                         break
+                    elif result == "left_arrow" and recorded_episodes > 0:
+                        # [W3] Left Arrow pressed -> undo last episode
+                        state = RecordingState.UNDO_LAST_EPISODE
+                        continue
 
-                    # After user presses Enter, disable leader torque for dummy_follower
+                    # After user presses Enter, sync gripper zeros and disable leader torque for dummy_follower
                     if robot.name == "dummy_follower" and teleop is not None:
                         if hasattr(teleop, 'prepare_recording_start'):
-                            teleop.prepare_recording_start()
+                            teleop.prepare_recording_start(robot)
 
                     # [W1] WAITING -> RECORDING
                     state = RecordingState.RECORDING
@@ -600,6 +609,14 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     events["rerecord_episode"] = False
                     events["esc_pressed"] = False
 
+                    # Move arms to work pose BEFORE saving episode (video encoding)
+                    # This allows user to release the arm while video encoding happens
+                    if robot.name == "dummy_follower" and teleop is not None:
+                        teleop.bus.enable_torque()
+                        robot.bus.enable_torque()
+                        teleop.bus.move_to_pose(teleop.config.work_pose)
+                        robot.bus.move_to_pose(robot.config.work_pose)
+
                     dataset.save_episode()
                     recorded_episodes += 1
                     log_say("Episode saved", cfg.play_sounds)
@@ -617,6 +634,14 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     events["exit_early"] = False
                     events["rerecord_episode"] = False
                     events["esc_pressed"] = False
+
+                    # Move arms to work pose BEFORE clearing episode buffer
+                    # This allows user to release the arm while clearing happens
+                    if robot.name == "dummy_follower" and teleop is not None:
+                        teleop.bus.enable_torque()
+                        robot.bus.enable_torque()
+                        teleop.bus.move_to_pose(teleop.config.work_pose)
+                        robot.bus.move_to_pose(robot.config.work_pose)
 
                     log_say("Re-record episode", cfg.play_sounds)
                     dataset.clear_episode_buffer()
@@ -644,7 +669,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     # Pass events=None to make it non-interruptible
                     if robot.name == "dummy_follower":
                         if teleop is not None and hasattr(teleop, 'prepare_for_next_episode'):
-                            teleop.prepare_for_next_episode(robot, events=None)
+                            teleop.prepare_for_next_episode(robot, events=None, skip_arm_movement=True)
                             skip_reset_loop = True
                         else:
                             robot.reset()
@@ -666,6 +691,22 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         )
 
                     # [T1] RESETTING -> WAITING
+                    state = RecordingState.WAITING
+                    continue
+
+                # ==================== UNDO_LAST_EPISODE state ====================
+                elif state == RecordingState.UNDO_LAST_EPISODE:
+                    # Ignore all keys
+                    events["exit_early"] = False
+                    events["rerecord_episode"] = False
+                    events["esc_pressed"] = False
+
+                    log_say("Deleting last episode", cfg.play_sounds)
+                    dataset.undo_last_episode()
+                    recorded_episodes -= 1
+                    print(f"Episode {recorded_episodes + 1} deleted. Now at episode {recorded_episodes}.")
+
+                    # [U1] UNDO_LAST_EPISODE -> WAITING
                     state = RecordingState.WAITING
                     continue
 

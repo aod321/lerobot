@@ -180,20 +180,36 @@ class DummyLeader(Teleoperator):
         """
         self.bus.enable_torque()
 
-    def prepare_recording_start(self) -> None:
-        """Prepare for recording start by disabling leader torque.
+    def prepare_recording_start(self, robot=None) -> None:
+        """Prepare for recording start by syncing gripper zeros and disabling leader torque.
 
         Called from WAITING state after user presses Enter to start recording.
-        This allows the user to hold the arm before torque is disabled.
+        This syncs both gripper zero positions so the follower won't jump when recording starts.
+
+        Args:
+            robot: Optional robot instance (DummyFollower) to sync gripper zero.
         """
+        # Sync gripper zeros - set current positions as zero for both grippers
+        # This prevents follower gripper from jumping to leader's position
+        if self._gripper_mode == "fibre":
+            self.bus.set_hand_zero()
+            self.bus.enable_hand()  # 刷新数据，确保位置值相对于新零点
+            logger.info("Leader gripper zero position set")
+
+        if robot is not None and hasattr(robot, 'bus') and hasattr(robot, '_gripper_mode'):
+            if robot._gripper_mode == "fibre":
+                robot.bus.set_hand_zero()
+                robot.bus.enable_hand()  # 刷新数据，确保位置值相对于新零点
+                logger.info("Follower gripper zero position set")
+
         self.bus.disable_torque()
         logger.info("Leader torque disabled - arm is now free for teaching")
 
-    def prepare_for_next_episode(self, robot=None, events: dict | None = None) -> bool:
+    def prepare_for_next_episode(self, robot=None, events: dict | None = None, skip_arm_movement: bool = False) -> bool:
         """Prepare the leader arm for the next episode.
 
         This method is called between episodes during recording to:
-        1. Enable torque and move the leader arm back to work pose
+        1. Enable torque and move the leader arm back to work pose (unless skip_arm_movement=True)
         2. Disable follower gripper torque so user can manually reset it
         3. Enable follower gripper and set zero position
 
@@ -206,26 +222,28 @@ class DummyLeader(Teleoperator):
                    to work pose simultaneously for faster reset.
             events: Optional event dictionary from keyboard listener (unused,
                     kept for API compatibility).
+            skip_arm_movement: If True, skip the arm movement (already done in SAVING state).
 
         Returns:
             True: Always returns True (no interruption possible here)
         """
-        # CRITICAL: Enable torque first - leader was disabled for teaching!
-        # Cannot move_j on a disabled arm.
-        self.bus.enable_torque()
+        if not skip_arm_movement:
+            # CRITICAL: Enable torque first - leader was disabled for teaching!
+            # Cannot move_j on a disabled arm.
+            self.bus.enable_torque()
 
-        # Move both arms simultaneously if robot is provided
-        if robot is not None and hasattr(robot, 'bus'):
-            logger.info("Moving both arms to work pose simultaneously...")
-            robot.bus.enable_torque()
-            robot.bus.move_to_pose(robot.config.work_pose)  # Non-blocking
-            self.bus.move_to_pose(self.config.work_pose)    # Non-blocking
-        else:
-            logger.info("Moving leader to work pose...")
-            self.bus.move_to_pose(self.config.work_pose)
+            # Move both arms simultaneously if robot is provided
+            if robot is not None and hasattr(robot, 'bus'):
+                logger.info("Moving both arms to work pose simultaneously...")
+                robot.bus.enable_torque()
+                robot.bus.move_to_pose(robot.config.work_pose)  # Non-blocking
+                self.bus.move_to_pose(self.config.work_pose)    # Non-blocking
+            else:
+                logger.info("Moving leader to work pose...")
+                self.bus.move_to_pose(self.config.work_pose)
 
-        # Wait once for both moves to complete
-        time.sleep(2.0)
+            # Wait once for both moves to complete
+            time.sleep(2.0)
 
         # Disable follower gripper torque so user can manually reset it
         self._disable_follower_gripper(robot)

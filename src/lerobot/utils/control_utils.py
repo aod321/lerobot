@@ -254,9 +254,9 @@ def sanity_check_dataset_robot_compatibility(
 
 
 def interruptible_input(prompt: str = "", events: dict | None = None,
-                        check_interval: float = 0.1) -> bool:
+                        check_interval: float = 0.1) -> str:
     """
-    Wait for Enter key press with ESC interrupt support using event-driven mechanism.
+    Wait for key press with support for Enter, ESC, and Left Arrow.
 
     This function uses pynput events instead of stdin buffer to avoid the chain
     effect bug where Enter keys pressed during recording would accumulate in the
@@ -265,12 +265,13 @@ def interruptible_input(prompt: str = "", events: dict | None = None,
     Args:
         prompt: Optional prompt string to display.
         events: Event dictionary from init_keyboard_listener(). Required for
-                event-driven input. If None, the function returns True immediately.
+                event-driven input. If None, the function returns "enter" immediately.
         check_interval: How often to check for key events (in seconds).
 
     Returns:
-        True if the user pressed Enter.
-        False if ESC was pressed (interrupt).
+        "enter": User pressed Enter
+        "esc": User pressed ESC
+        "left_arrow": User pressed Left Arrow (rerecord_episode event)
     """
     import time
 
@@ -279,7 +280,7 @@ def interruptible_input(prompt: str = "", events: dict | None = None,
 
     # If no events dict provided, return immediately (headless mode fallback)
     if events is None:
-        return True
+        return "enter"
 
     # Clear any residual enter event before waiting (ensures one-shot behavior)
     events["enter_pressed"] = False
@@ -287,11 +288,16 @@ def interruptible_input(prompt: str = "", events: dict | None = None,
     while True:
         if events.get("esc_pressed"):
             print()  # Newline after prompt
-            return False
+            return "esc"
+
+        if events.get("rerecord_episode"):
+            events["rerecord_episode"] = False  # Consume the event immediately
+            print()  # Newline after prompt
+            return "left_arrow"
 
         if events.get("enter_pressed"):
             events["enter_pressed"] = False  # Consume the event immediately
             print()  # Newline after prompt
-            return True
+            return "enter"
 
         time.sleep(check_interval)
